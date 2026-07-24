@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "deadman-rises",
+  "displayName": "Deadman Rises",
+  "version": "0.1.0",
+  "description": "A dead-man's switch for Claude Code: auto-resume long-running work after a session-limit stall, with an exact-time First/Second/Third Rise retry echelon, a durable Grave state file with a one-winner Seal, plain-English failure classification, Endless (loop) mode across usage windows, and hands-free Death Watch auto-arm at ~80% of the 5-hour window.",
+  "author": {
+    "name": "Fenil"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dead-man-switch",
+    "auto-resume",
+    "rate-limit",
+    "session-limit",
+    "resilience",
+    "cron",
+    "hooks",
+    "statusline",
+    "overnight"
+  ]
+}

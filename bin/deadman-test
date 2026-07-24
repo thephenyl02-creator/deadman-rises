@@ -1,0 +1,6 @@
+#!/bin/sh
+# Deadman Rises — run the packaged test suite in a sandbox (HOME/USERPROFILE are
+# redirected to a scratch dir; real ~/.claude/deadman state is never touched).
+# Thin launcher for tests/run-tests.js. Requires `node` on PATH.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$here/../tests/run-tests.js" "$@"

@@ -1,0 +1,87 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/deathwatch.js\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/deathwatch.js\""
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" rate_limit" }
+        ]
+      },
+      {
+        "matcher": "overloaded",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" overloaded" }
+        ]
+      },
+      {
+        "matcher": "server_error",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" server_error" }
+        ]
+      },
+      {
+        "matcher": "authentication_failed",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" authentication_failed" }
+        ]
+      },
+      {
+        "matcher": "oauth_org_not_allowed",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" oauth_org_not_allowed" }
+        ]
+      },
+      {
+        "matcher": "billing_error",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" billing_error" }
+        ]
+      },
+      {
+        "matcher": "invalid_request",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" invalid_request" }
+        ]
+      },
+      {
+        "matcher": "model_not_found",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" model_not_found" }
+        ]
+      },
+      {
+        "matcher": "max_output_tokens",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" max_output_tokens" }
+        ]
+      },
+      {
+        "matcher": "unknown",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/diagnose.js\" unknown" }
+        ]
+      }
+    ]
+  }
+}

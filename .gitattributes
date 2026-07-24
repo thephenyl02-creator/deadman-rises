@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repo so clones work identically on
+# Windows, macOS, and Linux (PowerShell and Node both read LF fine, and the
+# bin/ shell launchers REQUIRE LF to run on Unix).
+* text=auto eol=lf

@@ -1,0 +1,23 @@
+# Deadman runtime state — written into ~/.claude/deadman/ at run time, never the
+# repo. Listed here so a stray copy inside the working tree is never committed.
+grave.json
+usage.json
+armed.json
+test-result.json
+keepawake.pid
+*.pid
+*.log
+*.tmp
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.vscode/
+.idea/

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Deadman Rises — render /deadman status from the Grave (~/.claude/deadman/grave.json
+# + usage.json). Thin launcher for scripts/status.js. Requires `node` on PATH.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$here/../scripts/status.js" "$@"
