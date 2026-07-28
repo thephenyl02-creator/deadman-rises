@@ -206,12 +206,16 @@ optional Windows helpers extend that:
 | **Reboot helper** (`deadman-helper.js` + `install-helper.ps1`) | Resumes an armed, overdue, unresolved session **after a full restart** via a per-user logon task. | `powershell -ExecutionPolicy Bypass -File ~/.claude/deadman/install-helper.ps1` (once). |
 
 **Security note (important).** The reboot helper resumes in a **safe permission
-mode** (`acceptEdits`): it auto-accepts file edits but still **gates commands and
-other actions**, so an unattended resume that hits a gate **pauses rather than
-running unsupervised**. It **never bypasses permissions silently**;
-`bypassPermissions` is an explicit, documented opt-in with a stated risk. It has
-a `--dry-run`, a 25-minute watchdog, and only ever launches the highest-versioned
-bundled `claude.exe`. Full details in [SECURITY.md](SECURITY.md).
+mode** (`default`): nothing is auto-approved beyond a small `--allowedTools`
+allowlist — deadman's own Grave bookkeeping and the Cron tools — which is all
+this run needs. Everything else, **file edits included**, still requires
+approval, so an unattended resume that hits a gate **pauses rather than running
+unsupervised** and defers real project work to a supervised session. It **never
+bypasses permissions silently**; `bypassPermissions` is an explicit, documented
+opt-in with a stated risk. The Grave is treated as untrusted input and validated
+before any of it reaches the command line. It has a `--dry-run`, a 25-minute
+watchdog, and only ever launches the highest-versioned bundled `claude.exe`.
+Full details in [SECURITY.md](SECURITY.md).
 
 ---
 

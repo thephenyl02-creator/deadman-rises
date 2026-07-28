@@ -32,6 +32,7 @@ const TEST_FILES = [
   'diagnose.test.js',
   'status.test.js',
   'statusline.session.test.js',
+  'security.test.js',
 ];
 
 function copyDirFlat(fromDir, filterExt, toDir) {

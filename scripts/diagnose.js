@@ -39,21 +39,44 @@ function main() {
     G = require('./grave.js');
   } catch (e) { return; }
 
-  const g = G.readGrave();
-  if (!g) return; // nothing to record against
+  // Take the Grave lock for the whole read-modify-write. Unlocked, this hook can
+  // land between a Rise's claim and its verify-read and blow away the seal that
+  // Rise just wrote — losing the claim and making a legitimate sole winner
+  // report LOST. Everything that mutates the Grave shares one mutex.
+  //
+  // This runs at turn-end, so it waits only briefly and then gives up:
+  // last_failure is a hint, and losing it costs far less than stalling every
+  // turn behind a busy lock — or writing unlocked and destroying a live claim.
+  let recorded = false;
+  G.withGraveLock(() => {
+    const g = G.readGrave();
+    if (!g) return; // nothing to record against
 
-  // Session guard: never cross-contaminate another session's Grave.
-  if (g.session_id && event.session_id && g.session_id !== event.session_id) return;
+    // Session guard: never cross-contaminate another session's Grave.
+    if (g.session_id && event.session_id && g.session_id !== event.session_id) return;
 
-  const reason = event.message || event.reason || event.error || REASON_MAP[type] || REASON_MAP.unknown;
+    // The reason is an upstream API error string we do not control, and it is
+    // re-read later by a model (status output, and the Fired Rise's failure
+    // triage). Sanitise on the way in — see sanitizeText in grave.js.
+    const rawReason = event.message || event.reason || event.error || REASON_MAP[type] || REASON_MAP.unknown;
+    const reason = G.sanitizeText(rawReason, 200);
 
-  G.setPath(g, 'last_failure', {
-    type,
-    reason,
-    epoch: G.nowSec(),
-    source: 'diagnose',
-  });
-  G.writeGrave(g);
+    G.setPath(g, 'last_failure', {
+      type,
+      reason,
+      epoch: G.nowSec(),
+      source: 'diagnose',
+    });
+    G.writeGrave(g);
+    recorded = true;
+  }, { tries: 10, ifBusy: 'skip' });
+
+  // Losing a failure record silently would leave the Fired Rise's triage
+  // reasoning about a stall it has no evidence for. stdout is ignored by Claude
+  // Code, so say it on stderr where it lands in the hook log.
+  if (!recorded) {
+    try { process.stderr.write('deadman/diagnose: grave busy, failure not recorded (' + type + ')\n'); } catch (e) {}
+  }
 }
 
 try {

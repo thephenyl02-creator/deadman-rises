@@ -42,9 +42,131 @@ function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } ca
 // the new complete file, never a torn one.
 function atomicWrite(p, obj) {
   ensureDir();
-  const tmp = p + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-  fs.renameSync(tmp, p);
+  // The temp name MUST be unique per writer. With a shared "<file>.tmp", two
+  // concurrent writers interleave their writes into the same scratch file and
+  // then both rename it into place — publishing a torn, unparseable Grave as
+  // the source of truth. (Reproduced: 4 of 60 rounds with 4 writers.)
+  const tmp = `${p}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+    // Windows raises a transient EPERM/EBUSY when another process — commonly an
+    // antivirus real-time scanner — has the destination open for a moment.
+    // Measured at ~10% under concurrent writers, so retry briefly before failing.
+    for (let i = 0; ; i++) {
+      try { fs.renameSync(tmp, p); break; }
+      catch (e) {
+        if (i >= 10 || (e.code !== 'EPERM' && e.code !== 'EBUSY' && e.code !== 'EACCES')) throw e;
+        sleepMs(30);
+      }
+    }
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* best-effort cleanup */ }
+    throw e;
+  }
+  sweepTemps(p);
+}
+
+// A hard kill between the write and the rename leaves a uniquely-named temp
+// file that nothing else would ever remove. Sweep old ones opportunistically —
+// only files clearly older than any in-flight write.
+function sweepTemps(p) {
+  try {
+    const dir = path.dirname(p);
+    const base = path.basename(p) + '.';
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith(base) || !f.endsWith('.tmp')) continue;
+      const full = path.join(dir, f);
+      try {
+        if (Date.now() - fs.statSync(full).mtimeMs > 60000) fs.unlinkSync(full);
+      } catch (e) { /* raced with another sweeper */ }
+    }
+  } catch (e) { /* sweeping is best-effort */ }
+}
+
+/*
+ * Cross-process mutex for read-modify-write sequences on the Grave.
+ *
+ * atomicWrite (above) only prevents TORN files; it gives no mutual exclusion.
+ * Without a lock, two Rises firing at the same second can both read
+ * `seal.owner: null`, both decide WON, and both continue the same generation —
+ * defeating the entire point of the Seal. fs.openSync(..., 'wx') is an atomic
+ * create-if-absent on Windows and POSIX alike, so exactly one holder wins.
+ *
+ * A crashed holder cannot wedge the Grave forever: a lock older than
+ * LOCK_STALE_MS is broken. Callers that cannot get the lock fall through and
+ * run unlocked rather than failing the recovery — a missed lock is worse than
+ * a missed Rise, but a dead Grave is worse than both.
+ */
+const LOCK = GRAVE + '.lock';
+// The wait budget must EXCEED the stale threshold, or a waiter always gives up
+// before it is allowed to break an abandoned lock and then runs unlocked —
+// which silently defeats the mutex exactly when it matters most.
+const LOCK_STALE_MS = 10000;                       // 10s → presumed abandoned
+const LOCK_TRIES = 100;                            // ×150ms = 15s > 10s
+const LOCK_WAIT_MS = 150;
+// Written into the lock file so a holder only ever removes ITS OWN lock. Without
+// this, a stalled holder whose lock was broken would delete the next holder's
+// live lock on its way out, admitting two writers at once.
+const LOCK_TOKEN = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+
+function sleepMs(ms) {
+  // Synchronous sleep without a dependency: block on an unshared buffer.
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch (e) { const end = Date.now() + ms; while (Date.now() < end) { /* spin */ } }
+}
+
+/*
+ * opts.tries   — how many LOCK_WAIT_MS attempts to make (default LOCK_TRIES).
+ * opts.ifBusy  — what to do when the budget runs out:
+ *                'run'  (default) proceed unlocked, warning on stderr — right
+ *                       for a Rise, where losing the recovery is worse than a
+ *                       racy write;
+ *                'skip' give up and return undefined — right for the turn-end
+ *                       hook, where the write is only a hint and a long stall
+ *                       (or clobbering a live claim) is worse than losing it.
+ */
+function withGraveLock(fn, opts) {
+  const o = opts || {};
+  const tries = o.tries || LOCK_TRIES;
+  // If the directory itself is unusable there is no lock to take. Honour the
+  // caller's ifBusy rather than silently running unlocked — 'skip' exists
+  // precisely to avoid an unlocked write.
+  try { ensureDir(); } catch (e) { return o.ifBusy === 'skip' ? undefined : fn(); }
+  for (let i = 0; i < tries; i++) {
+    let fd = null;
+    try { fd = fs.openSync(LOCK, 'wx'); }
+    catch (e) {
+      // EPERM/EBUSY/EACCES here are the same transient Windows conditions
+      // atomicWrite retries (an AV scanner holding the file open); only a
+      // genuinely unlockable filesystem should abandon locking.
+      if (e.code !== 'EEXIST') {
+        if (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES') { sleepMs(LOCK_WAIT_MS); continue; }
+        break;
+      }
+      try {
+        if (Date.now() - fs.statSync(LOCK).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(LOCK);
+      } catch (e2) { /* someone else broke it first */ }
+      sleepMs(LOCK_WAIT_MS);
+      continue;
+    }
+    try {
+      fs.writeSync(fd, LOCK_TOKEN);
+      fs.closeSync(fd); fd = null;
+      return fn();
+    } finally {
+      if (fd != null) { try { fs.closeSync(fd); } catch (e) {} }
+      // Remove only OUR lock: if it was broken and re-taken while we ran, the
+      // file on disk now belongs to someone else and must be left alone.
+      try {
+        if (fs.readFileSync(LOCK, 'utf8') === LOCK_TOKEN) fs.unlinkSync(LOCK);
+      } catch (e) { /* already gone, or not ours */ }
+    }
+  }
+  if (o.ifBusy === 'skip') return undefined;
+  // Lock unavailable after the full budget: proceed rather than abandon a
+  // recovery, but say so — a silent unlocked write is how corruption hides.
+  try { process.stderr.write('grave: WARNING proceeding without lock\n'); } catch (e) {}
+  return fn();
 }
 
 function blankGrave() {
@@ -88,22 +210,85 @@ function writeGrave(g) {
   return g;
 }
 
-// Claude Code encodes ~/.claude/projects/<key>/ by replacing : \ / with -.
-// Derive by that transform, then confirm the directory exists; fall back to the
-// raw transform if the projects dir can't be scanned.
+// Claude Code encodes ~/.claude/projects/<key>/ by replacing every character
+// that is not a letter or digit with '-'. Replacing only : \ / (as this did
+// previously) is wrong for any path containing a space or a dot: measured
+// against the real transcript directories on a live machine, the old transform
+// matched 1 of 9 and this one matches all 9. `C:\Users\Ann Lee\.config` encodes
+// as `C--Users-Ann-Lee--config`, not `C--Users-Ann Lee-.config`.
+// NOTE: Claude Code additionally truncates keys over 200 characters and appends
+// a hash, which is not reproduced here — so for very deep paths this value is
+// informational only. Nothing security-relevant depends on it: the reboot
+// helper anchors on the session transcript's recorded cwd instead.
 function deriveProjectKey(cwd) {
   if (!cwd) return null;
-  const key = String(cwd).replace(/[\\/:]/g, '-');
-  try {
-    const projects = path.join(os.homedir(), '.claude', 'projects');
-    if (fs.existsSync(path.join(projects, key))) return key;
-  } catch (e) { /* ignore */ }
-  return key;
+  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 function sessionFromUsage() {
   const u = readJson(USAGE) || {};
   return u.session || {};
+}
+
+/*
+ * Untrusted text — upstream API error strings, and anything a local process
+ * wrote into the Grave — is re-read by a model and printed to a terminal.
+ *
+ * Whitelist printable ASCII rather than blacklisting known-bad characters: it
+ * covers real error messages and drops the entire injection class at once —
+ * C0/C1 controls, the NEL / LINE SEPARATOR / PARAGRAPH SEPARATOR terminators
+ * that a C0-only blacklist misses, zero-width and bidi-override characters, and
+ * the invisible Unicode Tag block used to smuggle hidden ASCII past a reader.
+ *
+ * Double quotes go too: status.js renders some of these fields inside quotes,
+ * and a value containing one can close its field and fake trailing fields.
+ *
+ * Over-long values are truncated from the MIDDLE: rate-limit messages put the
+ * reset time at the end, which is the single most useful token in the string.
+ * A value that sanitises away entirely (e.g. a wholly non-ASCII message) is
+ * reported as unavailable rather than rendering as a confusing blank.
+ */
+function sanitizeText(v, max) {
+  const limit = Math.max(8, Math.floor(max) || 200);
+  const raw = String(typeof v === 'string' ? v : JSON.stringify(v) || '');
+  let s = raw
+    .replace(/[^\x20-\x7E]/g, ' ')   // printable ASCII only
+    .replace(/[`<>"]/g, '')           // fence / markup / quote characters
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Marker still obeys the caller's limit — it is the one return path that
+  // would otherwise exceed it.
+  if (!s) return raw.trim() ? '(unprintable)'.slice(0, limit) : '';
+  if (s.length > limit) {
+    const head = Math.max(0, Math.floor(limit * 0.6) - 2);
+    const tail = Math.max(0, limit - head - 3);
+    s = s.slice(0, head) + '...' + s.slice(s.length - tail);
+  }
+  return s;
+}
+
+// Free-text fields anyone can write, cleaned before the Grave is handed to a
+// model by `grave.js read`. Structural fields are deliberately not touched.
+function sanitizeForRead(g) {
+  const c = JSON.parse(JSON.stringify(g));
+  if (c.last_failure && c.last_failure.reason != null) {
+    c.last_failure.reason = sanitizeText(c.last_failure.reason, 200);
+  }
+  if (c.last_recovery_result && c.last_recovery_result.detail != null) {
+    c.last_recovery_result.detail = sanitizeText(c.last_recovery_result.detail, 160);
+  }
+  if (typeof c.mode === 'string') c.mode = sanitizeText(c.mode, 24);
+  if (typeof c.background === 'string') c.background = sanitizeText(c.background, 40);
+  if (Array.isArray(c.rises)) {
+    for (const r of c.rises) {
+      if (!r) continue;
+      if (typeof r.role === 'string') r.role = sanitizeText(r.role, 24);
+      if (typeof r.status === 'string') r.status = sanitizeText(r.status, 24);
+      if (typeof r.cron_id === 'string') r.cron_id = sanitizeText(r.cron_id, 64);
+    }
+  }
+  if (c.seal && typeof c.seal.owner === 'string') c.seal.owner = sanitizeText(c.seal.owner, 64);
+  return c;
 }
 
 // Set a dotpath (e.g. "rises.0.status") to a JSON value, creating containers.
@@ -193,32 +378,48 @@ function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   try {
     switch (cmd) {
+      // `read` is the fired Rise's first action, so its output goes straight
+      // into model context. JSON.stringify escapes only C0 controls, quote and
+      // backslash — every class sanitizeText exists to block would otherwise
+      // pass through here even though status.js and diagnose.js clean the same
+      // fields. Sanitise the free-text ones on the way out; structural fields
+      // (ids, epochs, paths) are left exact so they stay usable.
       case 'read': {
-        const g = readGrave(); if (!g) die('no grave'); out(g); break;
+        const g = readGrave(); if (!g) die('no grave'); out(sanitizeForRead(g)); break;
       }
-      case 'init': out(cmdInit(rest)); break;
-      case 'set': {
+      // init reads prev.generation and writes a fresh Grave — a read-modify-write
+      // like the rest, so it needs the same mutual exclusion.
+      case 'init': out(withGraveLock(() => cmdInit(rest))); break;
+      case 'set': out(withGraveLock(() => {
         const g = readGrave() || blankGrave();
         const dotpath = rest[0];
         const raw = rest.slice(1).join(' ');
         let value; try { value = JSON.parse(raw); } catch (e) { value = raw; }
-        setPath(g, dotpath, value); out(writeGrave(g)); break;
-      }
-      case 'addrise': {
+        setPath(g, dotpath, value); return writeGrave(g);
+      })); break;
+      case 'addrise': out(withGraveLock(() => {
         const g = readGrave() || blankGrave();
         const [role, cronId, fire] = rest;
         g.rises = g.rises || [];
         g.rises.push({ role, cron_id: cronId, fire_time: parseInt(fire, 10), status: 'pending' });
-        out(writeGrave(g)); break;
-      }
-      case 'claim': {
-        const g = readGrave(); if (!g) { out('STALE'); break; }
+        return writeGrave(g);
+      })); break;
+      // The Seal decides which Rise continues the work, so its whole
+      // read-decide-write must be one critical section — see withGraveLock.
+      case 'claim': out(withGraveLock(() => {
+        const g = readGrave(); if (!g) return 'STALE';
         const [owner, gen] = rest;
         const r = claimSeal(g, owner, parseInt(gen, 10));
-        if (r === 'WON' || r === 'TAKEOVER') writeGrave(g);
-        out(r); break;
-      }
-      case 'rearm': {
+        if (r === 'WON' || r === 'TAKEOVER') {
+          writeGrave(g);
+          // Verify the claim actually landed: if anything raced past the lock,
+          // report LOST rather than let two owners both believe they WON.
+          const after = readGrave();
+          if (!after || !after.seal || after.seal.owner !== owner) return 'LOST';
+        }
+        return r;
+      })); break;
+      case 'rearm': out(withGraveLock(() => {
         const f = parseFlags(rest);
         const g = readGrave() || blankGrave();
         const prevGen = g.generation || 0;
@@ -231,9 +432,9 @@ function main() {
         const ru = readJson(USAGE) || {};
         if (ru.five_hour && ru.five_hour.resets_at != null) g.window_resets_at = ru.five_hour.resets_at;
         g.last_recovery_result = { generation: prevGen, result: 'rearmed', detail: 'endless re-arm', epoch: nowSec() };
-        out(writeGrave(g)); break;
-      }
-      case 'rest': {
+        return writeGrave(g);
+      })); break;
+      case 'rest': out(withGraveLock(() => {
         const g = readGrave() || blankGrave();
         (g.rises || []).forEach(r => { r.status = 'deleted'; });
         g.endless = false;
@@ -246,13 +447,17 @@ function main() {
         g.keep_awake = g.keep_awake || { held: false, policy: 'never' };
         g.keep_awake.held = false;
         g.last_recovery_result = { generation: g.generation, result: 'stopped', detail: 'rest', epoch: nowSec() };
-        out(writeGrave(g)); break;
-      }
-      case 'clear': {
+        return writeGrave(g);
+      })); break;
+      // Runs under the lock like every other mutation: deleting the Grave out
+      // from under a live critical section is the same hazard as writing to it,
+      // and the wrapper releases only OUR lock on the way out (an unconditional
+      // unlink here would reopen the ownership hole LOCK_TOKEN closes).
+      case 'clear': out(withGraveLock(() => {
         try { fs.unlinkSync(GRAVE); } catch (e) {}
         try { fs.unlinkSync(ARMED); } catch (e) {}
-        out('cleared'); break;
-      }
+        return 'cleared';
+      })); break;
       default:
         die('unknown command: ' + cmd + '\nusage: grave.js <init|read|set|addrise|claim|rearm|rest|clear>');
     }
@@ -267,4 +472,5 @@ module.exports = {
   DIR, GRAVE, ARMED, USAGE, VERSION,
   nowSec, readJson, atomicWrite, blankGrave, readGrave, writeGrave,
   armedShim, deriveProjectKey, sessionFromUsage, setPath, claimSeal,
+  withGraveLock, sanitizeText,
 };

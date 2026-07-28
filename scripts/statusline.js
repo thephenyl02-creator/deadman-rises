@@ -54,7 +54,9 @@ try {
     session: {
       session_id: data.session_id || null,
       cwd: sessCwd,
-      project_key: sessCwd ? String(sessCwd).replace(/[\\/:]/g, '-') : null,
+      // Same encoding as grave.js deriveProjectKey — Claude Code replaces every
+      // non-alphanumeric character, not just : \ / . Keep the two in step.
+      project_key: sessCwd ? String(sessCwd).replace(/[^a-zA-Z0-9]/g, '-') : null,
     },
     updated_at: Math.floor(Date.now() / 1000),
   };

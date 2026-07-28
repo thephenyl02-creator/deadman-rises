@@ -42,9 +42,12 @@ try {
   const win = usage && usage[WINDOW];
   if (!win || win.used_percentage == null) process.exit(0); // no telemetry (e.g. API-key session) → stay silent
 
-  const pct = win.used_percentage;
-  const resetsAt = win.resets_at;
-  if (pct < THRESHOLD) process.exit(0);
+  // Both values are interpolated into an instruction injected on every turn, so
+  // coerce them to numbers here — a non-numeric resets_at would otherwise be
+  // echoed verbatim into model context.
+  const pct = Number(win.used_percentage);
+  const resetsAt = Number.isInteger(win.resets_at) ? win.resets_at : null;
+  if (!Number.isFinite(pct) || pct < THRESHOLD) process.exit(0);
 
   const armed = readJson(ARMED);
   if (armed && armed.armed_for_resets_at === resetsAt) process.exit(0); // already handled this window

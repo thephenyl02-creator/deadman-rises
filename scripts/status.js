@@ -9,6 +9,13 @@
  */
 const G = require('./grave.js');
 
+// Every Grave field rendered here is untrusted: the file is plain JSON any local
+// process can write, and this output is read by a terminal AND by the model
+// during a fired Rise. Sanitising only where diagnose.js writes is not enough —
+// `grave.js set <anypath> <value>` can put arbitrary text in any of these
+// fields — so each one is also cleaned on the way out.
+function s(v, max) { return v == null ? '' : G.sanitizeText(v, max || 120); }
+
 function fmtLocal(epoch) {
   if (epoch == null || typeof epoch !== 'number' || !isFinite(epoch)) return null;
   try { return new Date(epoch * 1000).toLocaleString(); } catch (e) { return null; }
@@ -52,7 +59,7 @@ function render(g, usage) {
     return lines.join('\n');
   }
 
-  lines.push(`DEADMAN — generation ${g.generation != null ? g.generation : '?'}`);
+  lines.push(`DEADMAN — generation ${Number.isInteger(g.generation) ? g.generation : '?'}`);
 
   // Life line: 5h / 7d usage percentages + countdown to 5h reset.
   const fiveHour = usage && usage.five_hour;
@@ -60,12 +67,15 @@ function render(g, usage) {
   if (fiveHour || sevenDay) {
     let life = 'Life:              ';
     const parts = [];
-    if (fiveHour && fiveHour.used_percentage != null) {
+    // usage.json is written by the status line, but it is still a file on disk:
+    // coerce the percentages instead of interpolating whatever they contain.
+    const pct = v => (typeof v === 'number' && isFinite(v)) ? Math.round(v * 10) / 10 : null;
+    if (fiveHour && pct(fiveHour.used_percentage) != null) {
       const countdown = fmtCountdown(fiveHour.resets_at);
-      parts.push(`5h ${fiveHour.used_percentage}%${countdown ? '  (' + countdown + ')' : ''}`);
+      parts.push(`5h ${pct(fiveHour.used_percentage)}%${countdown ? '  (' + countdown + ')' : ''}`);
     }
-    if (sevenDay && sevenDay.used_percentage != null) {
-      parts.push(`7d ${sevenDay.used_percentage}%`);
+    if (sevenDay && pct(sevenDay.used_percentage) != null) {
+      parts.push(`7d ${pct(sevenDay.used_percentage)}%`);
     }
     if (parts.length) lines.push(life + parts.join('   '));
   }
@@ -80,9 +90,9 @@ function render(g, usage) {
   if (Array.isArray(g.rises) && g.rises.length) {
     for (const r of g.rises) {
       if (!r) continue;
-      const role = cap(r.role || 'rise');
-      const status = r.status != null ? r.status : '?';
-      const cronId = r.cron_id != null ? r.cron_id : '?';
+      const role = cap(s(r.role, 24) || 'rise');
+      const status = r.status != null ? s(r.status, 24) : '?';
+      const cronId = r.cron_id != null ? s(r.cron_id, 64) : '?';
       const fireLocal = fmtLocal(r.fire_time);
       lines.push(`${role} Rise:  ${status}   ${cronId}   ${fireLocal != null ? fireLocal : '?'}`);
     }
@@ -91,13 +101,13 @@ function render(g, usage) {
   // Endless / Mode
   {
     const endless = g.endless ? 'on' : 'off';
-    const mode = g.mode != null ? g.mode : '?';
+    const mode = g.mode != null ? s(g.mode, 24) : '?';
     lines.push(`Endless Rise: ${endless}     Mode: ${mode}`);
   }
 
   // Background / Souls
   {
-    const background = g.background != null ? g.background : 'unknown';
+    const background = g.background != null ? s(g.background, 40) : 'unknown';
     let souls = '?';
     if (g.souls) {
       souls = g.souls.paid ? 'paid' : (g.souls.protected ? 'protected' : '?');
@@ -108,9 +118,9 @@ function render(g, usage) {
   // Last recovery
   if (g.last_recovery_result) {
     const lr = g.last_recovery_result;
-    const result = lr.result != null ? lr.result : '?';
-    const gen = lr.generation != null ? lr.generation : '?';
-    const detail = lr.detail != null ? lr.detail : '';
+    const result = lr.result != null ? s(lr.result, 24) : '?';
+    const gen = Number.isInteger(lr.generation) ? lr.generation : '?';
+    const detail = s(lr.detail, 160);
     const age = fmtAgo(lr.epoch);
     lines.push(`Last recovery: ${result} (gen ${gen}) — "${detail}"${age != null ? '  · ' + age + ' ago' : ''}`);
   } else {
@@ -120,8 +130,8 @@ function render(g, usage) {
   // Last failure
   if (g.last_failure) {
     const lf = g.last_failure;
-    const type = lf.type != null ? lf.type : '?';
-    const reason = lf.reason != null ? lf.reason : '';
+    const type = lf.type != null ? s(lf.type, 40) : '?';
+    const reason = s(lf.reason, 200);
     const age = fmtAgo(lf.epoch);
     lines.push(`Last failure:  ${type} — ${reason}${age != null ? '  · ' + age + ' ago' : ''}`);
   } else {

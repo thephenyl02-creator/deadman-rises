@@ -23,8 +23,12 @@ it, so state is the same no matter where the package is installed).
 | `armed.json` | `grave.js` (derived shim) | `armed_for_resets_at`, `armed_at`, `mode`. Debounce flag only. |
 | `usage.json` | `statusline.js` | 5h/7d used-percentage and reset epochs, plus a session block (session id, cwd, project key). |
 | `helper.log` | `deadman-helper.js` | Timestamped lines about reboot-helper decisions (skip/resume). |
-| `keepawake.pid` | `keepawake.js` | The PID of the keep-awake holder process. |
 | `test-result.json` | `/deadman test` probes | Temporary; deleted by the test flow. |
+| `grave.json.lock` | `grave.js` | Transient mutex file; holds only an opaque owner token, removed on release. |
+
+`keepawake.js` deliberately writes **no PID file**: it finds its holder by
+command line, so a stale PID that Windows has reused can never cause an
+unrelated process to be killed.
 
 **No secrets are stored.** No API keys, tokens, passwords, or message content.
 The session id is an opaque Claude Code conversation identifier; the cwd/project
@@ -64,14 +68,41 @@ runs from a per-user Windows logon task (`install-helper.ps1`) and does
 Resurrection Time, and not already rested/resolved. When it does resume, it runs:
 
 ```
-claude.exe --resume <session_id> -p <recovery prompt> --permission-mode acceptEdits
+claude.exe --resume <session_id> -p <recovery prompt> \
+  --permission-mode default \
+  --allowedTools "Bash(node ~/.claude/deadman/grave.js:*) CronCreate CronList CronDelete"
 ```
 
-- **Default `acceptEdits`** (set in `deadman-helper.js` as `PERMISSION_MODE`):
-  auto-accepts file edits (the common recovery action) but **still gates commands
-  and other actions**, so an unattended resume that hits a gate **pauses or
-  aborts** rather than running unsupervised. This is a deliberate, non-negotiable
-  default.
+- **Default `default`** (set in `deadman-helper.js` as `PERMISSION_MODE`): nothing
+  is auto-approved except the tools on the `--allowedTools` list — deadman's own
+  Grave bookkeeping and the Cron tools. That is everything this run legitimately
+  needs (claim the Seal, re-arm coverage, record state). Every other action,
+  **including file edits**, still requires approval, and with no human present it
+  does not run: the resume re-arms coverage and defers real project work to a
+  supervised session.
+- **Why not `acceptEdits`** (used before v0.1.1): unsupervised file-write is
+  effectively command execution on this system — a written
+  `.claude/settings.json` hook or shell profile runs later without any command
+  ever being approved. Since the allowlist already covers the helper's real
+  needs, edit auto-approval was removed rather than documented around.
+- **The Grave is treated as untrusted input.** Anything running as your user can
+  write `grave.json`, so every field is validated **before the helper acts on any
+  of it** — before it schedules a follow-up task, looks for `claude.exe`, or
+  builds a command line. `session_id` must be alphanumeric-initial (a
+  hyphen-leading value would land on the command line as its own flag rather
+  than as the id, which is how a tampered Grave could otherwise switch the run
+  to full permission bypass); `generation` and `resurrection_time` must be
+  integers; `project` must be an existing absolute directory.
+
+  **The working directory is anchored on Claude Code's own session transcript.**
+  Comparing `project` against `project_key` would prove nothing — both are
+  derived from `project`, so whoever sets one sets the other, and `grave.js set`
+  is on the unattended run's own allowlist. Instead the helper locates
+  `<session_id>.jsonl` under `~/.claude/projects/`, reads the `cwd` Claude Code
+  recorded there, and requires it to equal `project`. That record is written by
+  Claude Code, not by deadman, and a session holding only `grave.js` and the
+  Cron tools cannot author one. On anything odd the helper logs the reason and
+  refuses to resume — it never falls back to a default directory.
 - **`bypassPermissions` is an explicit opt-in only.** Changing `PERMISSION_MODE`
   to `bypassPermissions` lets the resumed session run **any command with no
   approval** while you are away. That is a real risk; the code comments say so.
@@ -95,6 +126,17 @@ override user-initiated sleep or lid-close (Windows design). It is **opt-in**:
 the skill only acquires it when the Grave's `keep_awake.policy` asks for it, and
 the lease is dropped on `/deadman rest`. Expect higher idle power draw / faster
 battery drain while a lease is held - do not leave one held on battery.
+
+Holders are identified by matching the exact `-File "<full path>"` fragment of
+their command line, so a process that merely reads or names the holder script is
+never mistaken for one (and never killed). Two known limits, both self-correcting
+on the next `release`, which kills every match:
+
+- Two `acquire` runs racing in the same ~3-second window can each certify a
+  holder, leaving two leases. There is no cross-process mutex by design.
+- If the previous holder exits on its own during that window, Windows may reuse
+  its PID for the new one; `acquire` then reports failure naming a PID that is
+  no longer the incumbent. Re-running `release` then `acquire` resolves it.
 
 ## How to disable or fully remove
 
