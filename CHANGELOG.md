@@ -3,6 +3,80 @@
 All notable changes to Deadman Rises are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-30
+
+Consent, surfaces, and self-termination. Driven by real-use feedback: auto-arm
+must never touch a conversation that didn't ask for it, desktop/web users were
+being told to install telemetry their surface cannot run, and a forgotten
+endless chain woke every window over finished work.
+
+### Added
+- **Per-conversation opt-in gate for Death Watch.** The hooks stay installed
+  globally, but `deathwatch.js` now acts ONLY in a conversation that invoked
+  `/deadman`: it matches the live session id against the Grave's and exits
+  silently on no Grave, a rested Grave, or another conversation's Grave.
+- **`/deadman watch`** — opt in without arming; Death Watch auto-arms at 80% of
+  the 5h window (terminal + companion install only; offers an immediate arm when
+  telemetry is absent or stale). New `watch` field in the Grave; a watching
+  Grave's `armed.json` shim carries a null debounce key so it cannot silence
+  itself.
+- **Two install modes.** `install.ps1` (Core — skill + engine + Failure
+  Intelligence; works on terminal, desktop, and web) and `install.ps1
+  -DeathWatch` (adds the status line + auto-arm hooks; terminal only). The
+  README gains a surface matrix.
+- **Phantom-chip protocol** (skill + README known-issue): the Claude Code app
+  can keep showing scheduled-task chips after session-scoped jobs are gone.
+  `CronList` is the only authority; a delete of an already-gone job is success,
+  not an error; multiple stale stop-clicks get ONE combined ledger reply instead
+  of a round-trip per id.
+- **`deathwatch.test.js`** — 15 sandboxed assertions covering the gate
+  (opt-in/session/rest), staleness, threshold, debounce, and window-roll paths;
+  registered in `run-tests.js`.
+
+### Changed
+- **Endless Rise ends itself.** A fired Rise now checks for remaining work
+  BEFORE re-arming the next generation (nothing left → delete jobs, rest, "all
+  clear — endless chain ended"), and a Rise whose resumed work COMPLETES also
+  tears down the next-generation shots it armed. A forgotten chain no longer
+  drips a wasted wake every window.
+- **Stale telemetry can no longer mis-time an arm.** Death Watch ignores
+  `usage.json` older than ~10 minutes, and the skill's no-time arm uses the
+  telemetry reset only when fresh — otherwise the deliberately-late,
+  self-correcting now+5h03m fallback.
+- SKILL.md documents the corrected Grave concurrency story (cross-process lock
+  since 0.1.1) instead of the outdated "no OS lock" note.
+
+### Hardened during pre-ship adversarial verification
+
+An independent adversarial review of this release's diff found two blockers and
+four secondary defects in the first cut; all are fixed in this release (the
+flawed version was never published):
+
+- **Gate identity now comes from the hook's own event payload** (fail closed
+  without it), never from `usage.json`'s session block — which is written by
+  whichever terminal's status line refreshed last and could leak the auto-arm
+  trigger into a second, non-opted terminal (and let it clobber the opted-in
+  conversation's Grave).
+- **Write-side identity**: the hook stamps a turn-local `session.json`
+  (session id + cwd) on every invocation; `grave.js init` prefers a fresh stamp
+  over `usage.json`, accepts an explicit `--session` (which Death Watch triggers
+  now embed), and **refuses to create a watch Grave with no session id** (it
+  would be inert by construction — the user would be told "watching" while
+  never covered). The narrow same-instant cross-stamp race that remains is
+  documented rather than denied.
+- **Endless auto-stop requires positive, explicit evidence of completion**
+  (directive criterion met, an explicit done-marker, or a prior `all_clear`) —
+  absence of evidence is NOT completion, and in doubt it re-arms: a wasted wake
+  costs one turn, a wrong stop silently kills the overnight run. The definitive
+  completion judgment moved after full reconstruction (step 5g).
+- "A human is clearly driving" no longer tears down an endless chain — it routes
+  to the Override procedure (re-arm unless the user said stop), matching the
+  rest of the skill.
+- Telemetry lacking a `resets_at` epoch no longer produces an un-debounceable
+  arm-nag loop (the hook exits — there is nothing meaningful to arm for).
+- `grave.js rest` preserves a same-generation `all_clear` ledger entry instead
+  of overwriting the "chain ended because work completed" record.
+
 ## [0.1.1] - 2026-07-28
 
 Security patch release. A multi-agent security review of the published code

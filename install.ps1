@@ -12,8 +12,21 @@
   State always lives at ~/.claude/deadman/ (the scripts hardcode os.homedir()),
   so this installer just reproduces that layout.
 
+  TWO INSTALL MODES:
+
+    CORE (default) — works on EVERY surface: terminal, desktop app, web.
+      /deadman arms immediately when you invoke it. Installs the skill, the
+      engine, and the StopFailure hooks (Failure Intelligence). No status line.
+
+    -DeathWatch — Core PLUS hands-free auto-arm at 80% of the 5h window.
+      TERMINAL ONLY: it needs the status line, which the desktop app and web
+      do not render. Adds the statusLine command + the UserPromptSubmit /
+      PostToolUse hooks. Death Watch only ever acts in a conversation that
+      opted in by invoking /deadman — it never touches other conversations.
+
   Usage:
-    powershell -ExecutionPolicy Bypass -File install.ps1
+    powershell -ExecutionPolicy Bypass -File install.ps1                # Core
+    powershell -ExecutionPolicy Bypass -File install.ps1 -DeathWatch    # terminal
     powershell -ExecutionPolicy Bypass -File install.ps1 -Node "D:/nodejs/node.exe"
 
   -Node : ABSOLUTE path to the node.exe that Claude Code will run for the hooks and
@@ -22,7 +35,8 @@
           commands run through Git Bash, which strips unquoted backslashes.
 #>
 param(
-  [string]$Node
+  [string]$Node,
+  [switch]$DeathWatch
 )
 $ErrorActionPreference = 'Stop'
 
@@ -86,7 +100,8 @@ $statusLine = @"
   }
 "@
 
-$hooks = @"
+if ($DeathWatch) {
+  $hooks = @"
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "$nodeFwd $destFwd/deathwatch.js" } ] }
@@ -99,14 +114,34 @@ $sf
     ]
   }
 "@
+} else {
+  $hooks = @"
+  "hooks": {
+    "StopFailure": [
+$sf
+    ]
+  }
+"@
+}
 
+Write-Host ''
+if ($DeathWatch) {
+  Write-Host 'Mode: Core + Death Watch (TERMINAL ONLY - the desktop app / web render no status line)' -ForegroundColor Cyan
+} else {
+  Write-Host 'Mode: Core (all surfaces - /deadman arms immediately when invoked)' -ForegroundColor Cyan
+  Write-Host '      Re-run with -DeathWatch on a terminal for hands-free auto-arm at 80%.'
+}
 Write-Host ''
 Write-Host 'NEXT STEP - merge these into ~/.claude/settings.json (top-level keys):' -ForegroundColor Green
 Write-Host '--------------------------------------------------------------------'
-Write-Host '# statusLine (Death Watch telemetry + usage line):'
-Write-Host $statusLine
-Write-Host ''
-Write-Host '# hooks (Death Watch auto-arm + Failure Intelligence coroner):'
+if ($DeathWatch) {
+  Write-Host '# statusLine (Death Watch telemetry + usage line):'
+  Write-Host $statusLine
+  Write-Host ''
+  Write-Host '# hooks (Death Watch auto-arm + Failure Intelligence coroner):'
+} else {
+  Write-Host '# hooks (Failure Intelligence coroner - records why a turn died into the Grave):'
+}
 Write-Host $hooks
 Write-Host '--------------------------------------------------------------------'
 Write-Host ''

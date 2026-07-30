@@ -122,6 +122,50 @@ cli('set', 'last_failure', '{"type":"rate_limit","reason":"x","epoch":123,"sourc
 cli('rearm', '--reset', '1900200000');
 check('rearm clears last_failure', G.readGrave().last_failure === null);
 
+// 10d. watch with NO resolvable session -> refused (exit non-zero), grave not written
+cli('clear');
+try { fs.unlinkSync(G.USAGE); } catch (e) {}
+try { fs.unlinkSync(G.SESSJSON); } catch (e) {}
+{
+  let failed = false;
+  try { cli('init', '--mode', 'once', '--watch', 'true'); } catch (e) { failed = true; }
+  check('watch without session id -> refused loudly', failed === true);
+  check('watch refusal leaves no grave', G.readGrave() === null);
+}
+// restore usage.json for the remaining tests
+fs.writeFileSync(G.USAGE, JSON.stringify({
+  five_hour: { used_percentage: 82, resets_at: 1900000000 },
+  session: { session_id: 'sess-abc', cwd: 'C:/Users/Fenil/proj', project_key: 'C--Users-Fenil-proj' },
+}));
+
+// 10e. fresh session.json (hook stamp) beats usage.json's session block
+fs.writeFileSync(G.SESSJSON, JSON.stringify({ session_id: 'sess-stamped', cwd: 'C:/stamped', updated_at: G.nowSec() }));
+cli('init', '--mode', 'once');
+check('init prefers fresh session.json stamp', G.readGrave().session_id === 'sess-stamped');
+// stale stamp (>120s) falls back to usage.json
+fs.writeFileSync(G.SESSJSON, JSON.stringify({ session_id: 'sess-stamped', cwd: 'C:/stamped', updated_at: G.nowSec() - 300 }));
+cli('init', '--mode', 'once');
+check('stale session.json stamp -> falls back to usage.json', G.readGrave().session_id === 'sess-abc');
+// explicit --session beats both
+cli('init', '--mode', 'once', '--session', 'sess-explicit');
+check('--session beats both sources', G.readGrave().session_id === 'sess-explicit');
+try { fs.unlinkSync(G.SESSJSON); } catch (e) {}
+
+// 10f. rest preserves a same-generation all_clear ledger entry
+cli('clear');
+cli('init', '--mode', 'loop', '--endless', 'true');
+cli('set', 'last_recovery_result', '{"generation":1,"result":"all_clear","detail":"chain ended - work complete","epoch":123}');
+cli('rest');
+{
+  const lr = G.readGrave().last_recovery_result;
+  check('rest preserves all_clear ledger', lr.result === 'all_clear' && lr.detail === 'chain ended - work complete');
+}
+// ...but a plain rest (no all_clear) still records stopped/rest
+cli('clear');
+cli('init', '--mode', 'once');
+cli('rest');
+check('plain rest records stopped', G.readGrave().last_recovery_result.result === 'stopped');
+
 // 11. atomic write leaves valid JSON
 check('grave.json parseable', G.readGrave() !== null);
 

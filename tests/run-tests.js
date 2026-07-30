@@ -32,6 +32,7 @@ const TEST_FILES = [
   'diagnose.test.js',
   'status.test.js',
   'statusline.session.test.js',
+  'deathwatch.test.js',
   'security.test.js',
 ];
 

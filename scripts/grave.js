@@ -175,6 +175,7 @@ function blankGrave() {
     version: VERSION,
     session_id: null, project: null, project_key: null,
     generation: 0, mode: 'once', endless: false,
+    watch: false,              // /deadman watch — opted in, not armed yet; Death Watch arms at threshold
     resurrection_time: null,   // the true FIRE time (for human display)
     window_resets_at: null,    // the 5h reset epoch — the Death Watch debounce key
     rises: [],
@@ -196,10 +197,13 @@ function readGrave() { return readJson(GRAVE); }
 // suppression for the window), matching the pre-Grave armed.json contract.
 function armedShim(g) {
   const restful = g.seal && typeof g.seal.owner === 'string' && g.seal.owner.startsWith('rest@');
-  const mode = restful ? 'rest' : (g.endless ? 'loop' : g.mode);
+  // A WATCHING grave (opted in, nothing armed yet) must NOT emit a window-keyed
+  // debounce — that would silence Death Watch for the very window it is watching.
+  const watching = !restful && g.watch === true && !(g.rises || []).some(r => r && r.status === 'pending');
+  const mode = restful ? 'rest' : (watching ? 'watch' : (g.endless ? 'loop' : g.mode));
   // Debounce key MUST be the 5h reset (the window), NOT the fire time — else Death
   // Watch re-fires on any manual arm whose fire time differs from the reset.
-  const key = g.window_resets_at != null ? g.window_resets_at : g.resurrection_time;
+  const key = watching ? null : (g.window_resets_at != null ? g.window_resets_at : g.resurrection_time);
   return { armed_for_resets_at: key, armed_at: g.updated_at, mode };
 }
 
@@ -228,6 +232,30 @@ function deriveProjectKey(cwd) {
 function sessionFromUsage() {
   const u = readJson(USAGE) || {};
   return u.session || {};
+}
+
+/*
+ * Which conversation is invoking us? Two sources, in trust order:
+ *   1. session.json — stamped by the deathwatch hook from ITS OWN stdin payload
+ *      on every turn/tool call of the ACTIVE conversation. Preferred while
+ *      fresh: the stamp temporally closest to this init call is almost always
+ *      from the very turn running it.
+ *   2. usage.json's session block — written by whichever terminal's status line
+ *      refreshed last; racy across concurrent terminals, so it is only the
+ *      fallback (and the only source on installs without the hooks, where the
+ *      race cannot matter because Death Watch is not installed either).
+ * Residual race (documented in SKILL.md): two conversations actively mid-turn
+ * in the same sub-second window can still cross-stamp. --session on the CLI
+ * beats both sources and is race-free (the Death Watch trigger embeds it).
+ */
+const SESSJSON = path.join(DIR, 'session.json');
+const SESS_FRESH_S = 120;
+function resolveSession() {
+  const s = readJson(SESSJSON);
+  if (s && s.session_id && Number.isInteger(s.updated_at) && (nowSec() - s.updated_at) <= SESS_FRESH_S) {
+    return { session_id: s.session_id, cwd: s.cwd || (sessionFromUsage().cwd || null) };
+  }
+  return sessionFromUsage();
 }
 
 /*
@@ -348,7 +376,7 @@ function parseFlags(args) {
 function cmdInit(rest) {
   const f = parseFlags(rest);
   const prev = readGrave();
-  const sess = sessionFromUsage();
+  const sess = resolveSession();
   const usage = readJson(USAGE) || {};
   const g = blankGrave();
   g.session_id = f.session || sess.session_id || (prev && prev.session_id) || null;
@@ -357,6 +385,16 @@ function cmdInit(rest) {
   g.mode = f.mode || 'once';
   g.endless = (f.endless === 'true' || f.endless === true) || g.mode === 'loop';
   if (g.endless && g.mode === 'once') g.mode = 'loop';
+  g.watch = (f.watch === 'true' || f.watch === true); // /deadman watch: opt in now, arm at threshold
+  // A watch grave whose session cannot be identified is inert BY CONSTRUCTION:
+  // the gate requires grave.session_id to match the live conversation, so a
+  // null id means Death Watch never fires and the user is silently uncovered
+  // after being told "watching". Refuse loudly instead (throw → CLI exit 1,
+  // with the lock released by withGraveLock's finally).
+  if (g.watch && !g.session_id) {
+    throw new Error('watch refused: no session id available (no fresh session.json or usage.json session block) - ' +
+      'Death Watch could never fire for this conversation. Arm immediately instead, or pass --session <id>.');
+  }
   g.souls.paid = (g.mode === 'soul');
   g.resurrection_time = f.reset ? parseInt(f.reset, 10)
     : (usage.five_hour && usage.five_hour.resets_at != null ? usage.five_hour.resets_at : null);
@@ -446,7 +484,14 @@ function main() {
         g.backoff = { kind: null, count: 0 };
         g.keep_awake = g.keep_awake || { held: false, policy: 'never' };
         g.keep_awake.held = false;
-        g.last_recovery_result = { generation: g.generation, result: 'stopped', detail: 'rest', epoch: nowSec() };
+        // Preserve an all_clear the fired Rise just recorded for THIS generation
+        // — "the chain ended because the work completed" is the ledger entry
+        // /deadman status should keep showing, not the mechanical rest that
+        // immediately follows it.
+        const lr = g.last_recovery_result;
+        if (!(lr && lr.generation === g.generation && lr.result === 'all_clear')) {
+          g.last_recovery_result = { generation: g.generation, result: 'stopped', detail: 'rest', epoch: nowSec() };
+        }
         return writeGrave(g);
       })); break;
       // Runs under the lock like every other mutation: deleting the Grave out
@@ -469,8 +514,8 @@ function main() {
 if (require.main === module) main();
 
 module.exports = {
-  DIR, GRAVE, ARMED, USAGE, VERSION,
+  DIR, GRAVE, ARMED, USAGE, SESSJSON, VERSION,
   nowSec, readJson, atomicWrite, blankGrave, readGrave, writeGrave,
-  armedShim, deriveProjectKey, sessionFromUsage, setPath, claimSeal,
+  armedShim, deriveProjectKey, sessionFromUsage, resolveSession, setPath, claimSeal,
   withGraveLock, sanitizeText,
 };

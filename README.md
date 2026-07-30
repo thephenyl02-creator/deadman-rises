@@ -69,7 +69,8 @@ mechanism:
 | `/deadman` | Arm First/Second Rise for this session's 5-hour reset (or now+5h03m if unknown), then continue the current work. |
 | `/deadman <hours>` | Arm for now + that many hours. |
 | `/deadman at <time>` | Arm for an exact clock time (e.g. `at 3:40am`). A named reset from a limit error beats every assumption. |
-| `/deadman endless` (alias `loop`) | Endless Rise: re-arm each window before resuming, indefinitely, until you `rest`. |
+| `/deadman watch` | Opt in without arming: Death Watch auto-arms at 80% of the 5h window. **Terminal + Death Watch install only** - falls back to offering an immediate arm elsewhere. |
+| `/deadman endless` (alias `loop`) | Endless Rise: re-arm each window before resuming - and the chain **ends itself** when a Rise finds the work complete, so a forgotten chain never wakes forever. `rest` still stops it any time. |
 | `/deadman soul` | Soul Sacrifice: arm, report one line, then **stop completely** until the reset - for exhausted paid windows. Combines: `soul endless`. |
 | `/deadman status` | Render the Grave + Life (5h/7d %), Resurrection Time, pending Rises, mode, last recovery, last failure; then reconcile against `CronList`. |
 | `/deadman test` | Prove the install without touching real work: arm two throwaway probes, confirm they registered, clean up. `--fire` lets them fire once. |
@@ -82,8 +83,25 @@ embedded in the fired-Rise prompt, so the resumed turn knows what to do.
 
 ## Auto-equip (Death Watch)
 
-Deadman can arm itself before you run out - no `/deadman` typed - once the
-companion status line + hook are installed.
+Deadman can arm itself before you run out, once the companion status line + hook
+are installed (**terminal only** - the desktop app and web render no status
+line, so there is no telemetry there; on those surfaces `/deadman` simply arms
+immediately).
+
+**Strictly opt-in per conversation.** The hooks are installed globally, but
+Death Watch acts ONLY in a conversation that invoked `/deadman` (any form - arm,
+`watch`, `endless`, `soul`). The live conversation's identity comes from the
+hook invocation's **own event payload** - never from a shared file another
+terminal may have written - and is matched against the Grave's recorded id; no
+Grave, a rested Grave, another conversation's Grave, or an event without a
+session id all mean it exits silently (fail closed). A conversation that never
+asked for deadman is never interrupted. It also ignores any `usage.json` older
+than ~10 minutes, so a reading left behind by a dead terminal session can never
+trigger an arm days later. When arming, identity is recorded from a turn-local
+`session.json` stamp (written by the hook from its own payload) in preference to
+`usage.json`, and a Death Watch trigger embeds `--session <id>` outright - the
+one acknowledged residual: two conversations mid-turn in the same instant can
+still cross-stamp at `init` time (see SKILL notes).
 
 ```
 statusline.js  --writes-->  usage.json      (the ONLY reader of live usage %)
@@ -131,13 +149,14 @@ native plugin is structural/beta.
 
 ### Path 1 - Manual installer (verified)
 
-```powershell
-# from the repo root - auto-detects node from your PATH:
-powershell -ExecutionPolicy Bypass -File install.ps1
+Pick your mode by surface:
 
-# or point at a specific node.exe:
-powershell -ExecutionPolicy Bypass -File install.ps1 -Node "D:/nodejs/node.exe"
-```
+| Mode | Command | Works on | What `/deadman` does |
+|------|---------|----------|----------------------|
+| **Core** (default) | `powershell -ExecutionPolicy Bypass -File install.ps1` | **Terminal, desktop app, web** | Arms immediately when invoked. Includes the skill, engine, and Failure Intelligence (`StopFailure` hooks). |
+| **+ Death Watch** | `powershell -ExecutionPolicy Bypass -File install.ps1 -DeathWatch` | **Terminal only** (needs the status line) | Core, plus hands-free auto-arm at 80% - only in conversations that opted in via `/deadman`. |
+
+Add `-Node "D:/nodejs/node.exe"` to either if node isn't on your PATH.
 
 What it does:
 
@@ -145,7 +164,7 @@ What it does:
 |------|--------|
 | 1 | Copies `scripts/*.js` + `scripts/*.ps1` to `~/.claude/deadman/`. |
 | 2 | Copies `skills/deadman/SKILL.md` to `~/.claude/skills/deadman/SKILL.md`. |
-| 3 | **Prints** the `statusLine` + `hooks` blocks (with your node path and absolute `~/.claude/deadman/` paths) for you to **merge by hand** into `~/.claude/settings.json`. |
+| 3 | **Prints** the settings blocks for your mode (Core: `StopFailure` hooks only; `-DeathWatch`: also `statusLine` + `UserPromptSubmit`/`PostToolUse`) for you to **merge by hand** into `~/.claude/settings.json`. |
 
 It deliberately does **not** edit `settings.json`. Paste the printed blocks
 yourself, then **restart Claude Code**.
@@ -154,10 +173,11 @@ yourself, then **restart Claude Code**.
   isn't on PATH (`which node` in Git Bash to find it). Paths use forward slashes
   on purpose: on Windows these commands run through Git Bash, which strips
   unquoted backslashes.
-- The printed `hooks` block includes `UserPromptSubmit`, `PostToolUse`, and 10
-  `StopFailure` matchers (one per classified failure type). If your
-  `settings.json` already has a `hooks` block, merge the event arrays into it
-  rather than replacing it.
+- If your `settings.json` already has a `hooks` block, merge the event arrays
+  into it rather than replacing it.
+- Not sure which mode? **Core.** You can re-run with `-DeathWatch` later; the
+  hooks are safe everywhere (opt-in gated), Core just spares non-terminal
+  surfaces config that can't do anything there.
 
 ### Path 2 - Native plugin (structural / beta)
 
@@ -229,13 +249,26 @@ Deadman is deliberately transparent about what it can't do:
 | **Only the model can arm** | No script can call `CronCreate`. Auto-arm is a strong *nudge* the model obeys, not a hard trigger. A turn that dies into a *fully* dead API cannot arm a Third Rise - mitigated by arming early (healthy API), the +10 min Second Rise, and the Death Watch nudge. |
 | **No cron catch-up** | Crons fire only while the REPL is idle; a fire missed while the machine is asleep/off is **not** replayed. (The reboot helper covers the restart case.) |
 | **Session-only by default** | The switch survives a limit stall with the window open, but **not** closing the app or a crash - unless the Windows reboot helper is installed. |
-| **Death Watch needs an active session** | Usage only climbs while you work, so a fully idle, terminal-closed session won't auto-arm. Arm manually up front for those. |
-| **Endless is a chain, not a recurring cron** | 5-hour windows don't fit the cron grid, so each fire arms the next window. A broken link (missed fire) ends the chain. |
-| **No cross-process lock on the Grave** | A backgrounded + a resumed copy are last-writer-wins; the Seal's takeover rule still prevents double-continuation in practice. |
+| **Death Watch is terminal-only and opt-in** | It needs the status line (desktop/web render none) and only acts in conversations that invoked `/deadman`. Usage only climbs while you work, so a fully idle, terminal-closed session won't auto-arm. Arm manually up front for those. |
+| **Endless is a chain, not a recurring cron** | 5-hour windows don't fit the cron grid, so each fire arms the next window. A broken link (missed fire) ends the chain. A Rise that finds the work complete also ends it deliberately. |
+| **Exact reset time needs telemetry** | Without the status line, `/deadman` with no time falls back to now+5h03m — deliberately late (the 5h window is rolling) and self-correcting: any limit error naming the real reset re-arms to the exact minute. |
 
 Alternatives for the cases Deadman doesn't cover: `/loop` runs a prompt on a
 fixed interval in a live session; `/schedule` cloud routines survive the app
 closing but run in the cloud.
+
+---
+
+## Known issues
+
+- **Phantom scheduled-task chips (Claude Code app UI).** The app may keep
+  showing a scheduled-task chip after the underlying session-scoped job fired,
+  was deleted, or died with its session — chips can also mislabel one-shots as
+  "recurring". This is an app display issue, not deadman state: `CronList` (and
+  `/deadman status`, which reconciles against it) is the only truth. Clicking
+  stop on a stale chip just sends a message at a job that no longer exists; the
+  skill answers those with one combined ledger instead of erroring per id. The
+  chips clear on app restart.
 
 ---
 
@@ -267,7 +300,7 @@ deadman-rises/
 │   └── deadman-helper.js  install-helper.ps1  uninstall-helper.ps1
 ├── tests/                         # copied tests + sandboxed runner
 │   ├── grave.test.js  diagnose.test.js  status.test.js
-│   ├── statusline.session.test.js
+│   ├── statusline.session.test.js  deathwatch.test.js  security.test.js
 │   └── run-tests.js
 ├── bin/                           # thin launchers (node on PATH)
 │   ├── deadman-status  deadman-test
